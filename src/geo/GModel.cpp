@@ -75,7 +75,7 @@ GModel::GModel(const std::string &name)
     _occ_internals(nullptr), _acis_internals(nullptr),
     _parasolid_internals(nullptr), _fields(nullptr),
     _currentMeshEntity(nullptr), _numPartitions(0), normals(nullptr),
-    lcCallback(nullptr)
+    lcCallback(nullptr), lcMetricCallback(nullptr)
 {
   _maxVertexNum = CTX::instance()->mesh.firstNodeTag - 1;
   _maxElementNum = CTX::instance()->mesh.firstElementTag - 1;

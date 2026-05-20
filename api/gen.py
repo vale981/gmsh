@@ -486,10 +486,16 @@ doc = '''Set mesh size constraints at the given parametric points `parametricCoo
 mesh.add('setSizeAtParametricPoints', doc, None, iint('dim'), iint('tag'), ivectordouble('parametricCoord'), ivectordouble('sizes'))
 
 doc = '''Set a mesh size callback for the current model. The callback function should take six arguments as input (`dim', `tag', `x', `y', `z' and `lc'). The first two integer arguments correspond to the dimension `dim' and tag `tag' of the entity being meshed. The next four double precision arguments correspond to the coordinates `x', `y' and `z' around which to prescribe the mesh size and to the mesh size `lc' that would be prescribed if the callback had not been called. The callback function should return a double precision number specifying the desired mesh size; returning `lc' is equivalent to a no-op.'''
-mesh.add('setSizeCallback', doc, None, isizefun('callback'))
+mesh.add('setSizeCallback', doc, None, isizefun('sizeCallback'))
 
 doc = '''Remove the mesh size callback from the current model.'''
 mesh.add('removeSizeCallback', doc, None)
+
+doc = '''Set a mesh size callback for the current model. The callback function should take seven arguments as input (`dim', `tag', `x', `y', `z', `lc' and `metric'). The first two integer arguments correspond to the dimension `dim' and tag `tag' of the entity being meshed. The next four double precision arguments correspond to the coordinates `x', `y' and `z' around which to prescribe the mesh size and to the mesh size `lc' that would be prescribed if the callback had not been called. The seventh argument `metric' is a vector of double precision numbers (std::array in C++) containing the components of the symmetric metric tensor as it would be prescribed if the callback had not been called. The callback function can modify the `metric' in place or return a new vector of double precision numbers specifying the desired mesh size(s): a single number specifies an isotropic size and 6 numbers specify a symmetric anisotropic metric (the 6 components of the lower triangular part of the 3x3 matrix, in the order M11, M21, M22, M31, M32, M33). For convenience, in some languages (Python, Julia), a full 3x3 matrix can also be returned: the 6 unique components will then be extracted to define the symmetric metric.'''
+mesh.add('setMetricCallback', doc, None, isizemetricfun('metricCallback'))
+
+doc = '''Remove the mesh metric callback from the current model.'''
+mesh.add('removeMetricCallback', doc, None)
 
 doc = '''Set a transfinite meshing constraint on the curve `tag', with `numNodes' nodes distributed according to `meshType' and `coef'. Currently supported types are "Progression" (geometrical progression with power `coef'), "Bump" (refinement toward both extremities of the curve) and "Beta" (beta law).'''
 mesh.add('setTransfiniteCurve', doc, None, iint('tag'), iint('numNodes'), istring('meshType', '"Progression"'), idouble('coef', '1.'))

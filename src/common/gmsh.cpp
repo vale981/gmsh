@@ -5093,16 +5093,30 @@ GMSH_API void gmsh::model::mesh::setSizeAtParametricPoints(
 }
 
 GMSH_API void gmsh::model::mesh::setSizeCallback(
-  std::function<double(int, int, double, double, double, double)> callback)
+  std::function<double(int, int, double, double, double, double)> sizeCallback)
 {
   if(!_checkInit()) return;
-  GModel::current()->lcCallback = callback;
+  GModel::current()->lcCallback = sizeCallback;
 }
 
 GMSH_API void gmsh::model::mesh::removeSizeCallback()
 {
   if(!_checkInit()) return;
   GModel::current()->lcCallback = nullptr;
+}
+
+GMSH_API void gmsh::model::mesh::setMetricCallback(
+  std::function<void(int, int, double, double, double, double, double *)>
+    metricCallback)
+{
+  if(!_checkInit()) return;
+  GModel::current()->lcMetricCallback = metricCallback;
+}
+
+GMSH_API void gmsh::model::mesh::removeMetricCallback()
+{
+  if(!_checkInit()) return;
+  GModel::current()->lcMetricCallback = nullptr;
 }
 
 GMSH_API void

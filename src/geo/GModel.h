@@ -810,6 +810,8 @@ public:
 
   // mesh size callback
   std::function<double(int, int, double, double, double, double)> lcCallback;
+  std::function<void(int, int, double, double, double, double, double *)>
+    lcMetricCallback;
 
   // compute automatic sizing field from curvature
   void computeSizeField();
