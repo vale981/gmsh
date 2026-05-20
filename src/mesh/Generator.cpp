@@ -524,7 +524,7 @@ static void Mesh1D(GModel *m)
       if(!nIter) Msg::ProgressMeter(localPending, false, "Meshing 1D...");
     }
     if(exceptions) {
-      CTX::instance()->lock = 0;
+      // CTX::instance()->lock = 0; // handled by RAII
       throw std::runtime_error(Msg::GetLastError());
     }
     if(!nPending) break;
@@ -682,7 +682,7 @@ static void Mesh2D(GModel *m)
         if(!nIter) Msg::ProgressMeter(localPending, false, "Meshing 2D...");
       }
       if(exceptions) {
-        CTX::instance()->lock = 0;
+        // CTX::instance()->lock = 0; // handled by RAII
         throw std::runtime_error(Msg::GetLastError());
       }
       if(!nPending) break;
@@ -1521,14 +1521,19 @@ static bool quantize1DIfNeeded(GModel *m)
   return true;
 }
 
+struct MeshGenerationStackLock {
+  MeshGenerationStackLock() { CTX::instance()->lock = 1; }
+  ~MeshGenerationStackLock() { CTX::instance()->lock = 0; }
+};
+
 void GenerateMesh(GModel *m, int ask)
 {
   // ProfilerStart("gmsh.prof");
   if(CTX::instance()->lock) {
-    Msg::Info("I'm busy! Ask me that later...");
+    Msg::Error("I'm busy! Ask me that later...");
     return;
   }
-  CTX::instance()->lock = 1;
+  MeshGenerationStackLock lock;
 
   Msg::ResetErrorCounter();
 
@@ -1693,6 +1698,6 @@ void GenerateMesh(GModel *m, int ask)
     removeAllMeshEntitiesThatHaveSmallEdges();
   }
 
-  CTX::instance()->lock = 0;
+  // CTX::instance()->lock = 0; // handled by RAII
   // ProfilerStop();
 }
