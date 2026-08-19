@@ -1488,11 +1488,10 @@ int GModel::adaptMesh(std::vector<int> technique,
         }
       }
       else if(getDim() == 3) {
-        for(auto rit = firstRegion(); rit != lastRegion(); ++rit) {
-          refineMeshMMG(*rit);
-          if(_elementOctree) delete _elementOctree;
-          _elementOctree = nullptr;
-        }
+        std::vector<GRegion *> allRegions(firstRegion(), lastRegion());
+        refineMeshMMG(allRegions);
+        if(_elementOctree) delete _elementOctree;
+        _elementOctree = nullptr;
       }
 
       char name[256];

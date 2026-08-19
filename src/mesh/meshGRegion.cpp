@@ -236,14 +236,17 @@ void MeshDelaunayVolume(std::vector<GRegion *> &regions)
 
   // now do insertion of points
   if(CTX::instance()->mesh.algo3d == ALGO_3D_MMG3D) {
-    // Split the (possibly merged, if regions share a boundary) Delaunay
-    // tetrahedra back onto their individual GRegion before handing each one
-    // to MMG3D separately. maxIter=1 with a huge radius target makes this
-    // call classify only, without inserting any new point.
+    // Classify the (possibly merged, if regions share a boundary) Delaunay
+    // tetrahedra back onto their individual GRegion. maxIter=1 with a huge
+    // radius target makes this call classify only, without inserting any
+    // new point. All regions are then handed to Mmg3d together in a single
+    // call (see refineMeshMMG), tagged with their region so that Mmg
+    // preserves the interfaces between them as material boundaries; this
+    // avoids relying on each region's boundary-recovered triangulation
+    // being independently self-consistent, which can break down at
+    // junctions shared by more than two regions.
     insertVerticesInRegion(gr, 1, 1.e300, true, &sqr);
-    for(std::size_t i = 0; i < regions.size(); i++) {
-      refineMeshMMG(regions[i]);
-    }
+    refineMeshMMG(regions);
   }
   else if(CTX::instance()->mesh.algo3d != ALGO_3D_INITIAL_ONLY &&
 	  CTX::instance()->mesh.algo3d != ALGO_3D_RTREE) {
