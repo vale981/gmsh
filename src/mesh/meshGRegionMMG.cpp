@@ -217,6 +217,17 @@ static bool gmsh2MMG(std::vector<GRegion *> &regions, MMG5_pMesh mmg,
 
     gmsh2mmg_num[(*it)->getNum()] = k;
 
+    // Track every vertex's identity, independently of whether it also
+    // happens to lie on a boundary triangle (checked below via LCS): its
+    // Mmg ref was just set to getNum() above regardless, so MMG2gmsh must
+    // be able to recognize it as pre-existing either way. Conflating this
+    // with the LCS-gated metric-blending check below (as upstream does)
+    // means a vertex used only by tetrahedra, not registered on any GFace
+    // triangle, gets silently treated as brand-new on output -- creating a
+    // duplicate MVertex for one that already exists, and a double
+    // free/use-after-free once both copies get deleted.
+    mmg2gmsh[(*it)->getNum()] = *it;
+
     MVertex *v = *it;
     double U = 0, V = 0;
     if(!v->onWhat()) continue;
@@ -232,7 +243,6 @@ static bool gmsh2MMG(std::vector<GRegion *> &regions, MMG5_pMesh mmg,
 
     auto itv = LCS.find(v);
     if(itv != LCS.end()) {
-      mmg2gmsh[(*it)->getNum()] = *it;
       // if (Extend2dMeshIn3dVolumes()){
       double LL = itv->second.first / itv->second.second;
       SMetric3 l4(1. / (LL * LL));
@@ -460,13 +470,22 @@ void refineMeshMMG(std::vector<GRegion *> &regions)
   MMG3D_saveSol(mmg, sol, test);
 #endif
 
+  // Vertices tracked in mmg2gmsh are about to be reused as-is by MMG2gmsh
+  // below (found by their Mmg ref rather than recreated); a region-owned
+  // (dim 3) vertex can be tracked there too if it also happens to lie on a
+  // boundary triangle, so it must not be deleted here even though it's
+  // currently listed in some region's mesh_vertices.
+  std::set<MVertex *> reused;
+  for(auto &kv : mmg2gmsh) reused.insert(kv.second);
+
   for(GRegion *gr : regions) {
     gr->deleteVertexArrays();
     for(unsigned int i = 0; i < gr->tetrahedra.size(); ++i)
       delete gr->tetrahedra[i];
     gr->tetrahedra.clear();
-    for(unsigned int i = 0; i < gr->mesh_vertices.size(); ++i)
-      delete gr->mesh_vertices[i];
+    for(unsigned int i = 0; i < gr->mesh_vertices.size(); ++i) {
+      if(!reused.count(gr->mesh_vertices[i])) delete gr->mesh_vertices[i];
+    }
     gr->mesh_vertices.clear();
   }
 
