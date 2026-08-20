@@ -81,6 +81,22 @@ static void MMG2gmsh(std::vector<GRegion *> &regions, MMG5_pMesh mmg,
     }
     else {
       kToMVertex[k] = it->second;
+
+      // A reused vertex previously owned by one of `regions` (dim 3) had
+      // its owning region's mesh_vertices cleared by refineMeshMMG's
+      // cleanup, even though the vertex object itself was spared from
+      // deletion (see the "reused" set there) -- it needs to be
+      // re-attached to whichever region ends up using it below, exactly
+      // like a brand-new vertex. Otherwise it becomes reachable from a
+      // tetrahedron but owned by no entity's mesh_vertices, silently
+      // corrupting node numbering: GModel::indexMeshVertices only assigns
+      // valid output node indices to vertices found via some entity's
+      // mesh_vertices, so an orphaned-but-referenced vertex keeps a stale
+      // index, and .msh files end up with elements pointing at nodes that
+      // were never declared.
+      GEntity *owner = it->second->onWhat();
+      if(owner && owner->dim() == 3 && tagToRegion.count(owner->tag()))
+        unattached.insert(it->second);
     }
   }
 
