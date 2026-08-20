@@ -35,6 +35,7 @@ opt(3M "Enable proprietary 3M extension" OFF)
 opt(ALGLIB "Enable ALGLIB (used by some mesh optimizers)" ${DEFAULT})
 opt(ANN "Enable ANN (used for fast point search in mesh/post)" ${DEFAULT})
 opt(BAMG "Enable Bamg 2D anisotropic mesh generator" ${DEFAULT})
+opt(BOUNDARY_LAYERS "Enable boundary layer plugin" ${DEFAULT})
 opt(BLAS_LAPACK "Enable BLAS/Lapack for linear algebra (if Eigen if disabled)" OFF)
 opt(BLOSSOM "Enable Blossom algorithm (needed for full quad meshing)" ${DEFAULT})
 opt(BUILD_LIB "Enable 'lib' target for building static Gmsh library" OFF)
@@ -970,6 +971,13 @@ if(HAVE_MESH)
     add_subdirectory(contrib/MeshQualityOptimizer)
     include_directories(contrib/MeshQualityOptimizer)
     set_config_option(HAVE_OPTHOM "OptHom")
+  endif()
+
+  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/contrib/BoundaryLayers
+     AND ENABLE_BOUNDARY_LAYERS)
+    add_subdirectory(contrib/BoundaryLayers)
+    include_directories(contrib/BoundaryLayers)
+    set_config_option(HAVE_BOUNDARY_LAYERS "BoundaryLayers")
   endif()
 
   if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/contrib/domhex AND ENABLE_DOMHEX)
@@ -2365,10 +2373,8 @@ if(ENABLE_COVERAGE)
   if(LCOV AND GENHTML)
     set(LCOV_IGNORE "")
     set(GENHTML_IGNORE "")
-    execute_process(COMMAND ${LCOV} --version
-                    OUTPUT_VARIABLE LCOV_VERSION_STRING
-                    OUTPUT_STRIP_TRAILING_WHITESPACE
-                    ERROR_QUIET)
+    execute_process(COMMAND ${LCOV} --version OUTPUT_VARIABLE LCOV_VERSION_STRING
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(LCOV_VERSION_STRING MATCHES "LCOV version ([0-9]+)")
       if(CMAKE_MATCH_1 GREATER_EQUAL 2)
         set(LCOV_IGNORE --ignore-errors unused,source,source,inconsistent,inconsistent
@@ -2381,29 +2387,19 @@ if(ENABLE_COVERAGE)
     set(COV_FILTERED ${CMAKE_BINARY_DIR}/coverage.info)
     set(COV_HTML ${CMAKE_BINARY_DIR}/coverage)
     add_custom_target(coverage_reset
-      COMMAND ${LCOV} --quiet --directory ${CMAKE_BINARY_DIR}
-                      --zerocounters
+      COMMAND ${LCOV} --quiet --directory ${CMAKE_BINARY_DIR} --zerocounters
       COMMENT "Resetting code coverage counters")
     add_custom_target(coverage
       COMMAND ${LCOV} --quiet --directory ${CMAKE_BINARY_DIR}
-                      --base-directory ${CMAKE_SOURCE_DIR}
-                      --capture --output-file ${COV_RAW}
-                      ${LCOV_IGNORE}
-      COMMAND ${LCOV} --quiet
-                      --remove ${COV_RAW}
-                        "${CMAKE_SOURCE_DIR}/contrib/*"
-                        "${CMAKE_BINARY_DIR}/*"
-                        "petsc/include/*"
-                        "/usr/*" "/opt/*" "/Library/*" "/Applications/*"
-                      ${LCOV_IGNORE}
-                      --output-file ${COV_FILTERED}
+        --base-directory ${CMAKE_SOURCE_DIR} --capture --output-file ${COV_RAW}
+        ${LCOV_IGNORE}
+      COMMAND ${LCOV} --quiet --remove ${COV_RAW} "${CMAKE_SOURCE_DIR}/contrib/*"
+        "${CMAKE_BINARY_DIR}/*" "petsc/include/*" "/usr/*" "/opt/*" "/Library/*"
+        "/Applications/*" ${LCOV_IGNORE} --output-file ${COV_FILTERED}
       COMMAND ${GENHTML} --quiet --legend
-                         --title "Gmsh ${GMSH_VERSION} code coverage"
-                         --output-directory ${COV_HTML}
-                         ${GENHTML_IGNORE}
-                         ${COV_FILTERED}
-      COMMAND ${CMAKE_COMMAND} -E echo
-              "Coverage report: ${COV_HTML}/index.html"
+        --title "Gmsh ${GMSH_VERSION} code coverage" --output-directory ${COV_HTML}
+        ${GENHTML_IGNORE} ${COV_FILTERED}
+      COMMAND ${CMAKE_COMMAND} -E echo "Coverage report: ${COV_HTML}/index.html"
       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
       COMMENT "Generating HTML coverage report")
     add_dependencies(coverage gmsh)

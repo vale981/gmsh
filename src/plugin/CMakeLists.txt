@@ -34,6 +34,7 @@ set(SRC
   SpanningTree.cpp
   NewView.cpp
   SimplePartition.cpp Crack.cpp
+  DuplicateNodes.cpp
   MeshSubEntities.cpp
   MeshVolume.cpp
   CVTRemesh.cpp
@@ -44,7 +45,6 @@ set(SRC
   BoundaryAngles.cpp
   MeshSizeFieldView.cpp
   Invisible.cpp
-  BoundaryLayer.cpp
 )
 
 file(GLOB HDR RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} *.h)

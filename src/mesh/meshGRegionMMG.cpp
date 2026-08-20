@@ -13,7 +13,11 @@
 
 #if defined(HAVE_MMG)
 
+#include <algorithm>
+#include <map>
 #include <set>
+#include <vector>
+#include "GEntity.h"
 #include "GRegion.h"
 #include "GFace.h"
 #include "MTetrahedron.h"
@@ -26,36 +30,79 @@ extern "C" {
 #include <mmg/libmmg.h>
 }
 
-static void MMG2gmsh(GRegion *gr, MMG5_pMesh mmg,
+namespace {
+
+  // The union of the boundary faces of all `regions`, without double-counting
+  // a face shared between two regions (an internal interface).
+  std::vector<GFace *> boundaryFaces(const std::vector<GRegion *> &regions)
+  {
+    std::set<GFace *, GEntityPtrLessThan> facesSet;
+    for(GRegion *gr : regions) {
+      std::vector<GFace *> const &f = gr->faces();
+      facesSet.insert(f.begin(), f.end());
+    }
+    return std::vector<GFace *>(facesSet.begin(), facesSet.end());
+  }
+
+} // namespace
+
+static void MMG2gmsh(std::vector<GRegion *> &regions, MMG5_pMesh mmg,
                      std::map<int, MVertex *> &mmg2gmsh)
 {
-  std::map<int, MVertex *> kToMVertex;
+  std::map<int, GRegion *> tagToRegion;
+  for(GRegion *gr : regions) tagToRegion[gr->tag()] = gr;
+
   int np, ne, nt, na, ref;
   double cx, cy, cz;
 
   if(MMG3D_Get_meshSize(mmg, &np, &ne, nullptr, &nt, nullptr, &na) != 1)
     Msg::Error("Mmg3d: unable to get mesh size");
 
-  // Store the nodes from the Mmg structures into the gmsh structures
-
+  // Store the nodes from the Mmg structures into gmsh vertices. A vertex
+  // that already existed before remeshing (found in mmg2gmsh) is reused as
+  // is; a brand-new (Steiner) vertex is created without an owning entity
+  // yet, since -- now that a single combined mesh can span several
+  // GRegions -- its owning region is only known once a tetrahedron using it
+  // is seen below.
+  //
   // TODO: when MMG is allowed to modify the surface mesh, reclassify nodes
   // accordingly
+  std::vector<MVertex *> kToMVertex(np + 1, nullptr);
+  std::set<MVertex *> unattached;
   for(int k = 1; k <= np; k++) {
     if(MMG3D_Get_vertex(mmg, &cx, &cy, &cz, &ref, nullptr, nullptr) != 1)
       Msg::Error("Mmg3d: unable to get vertex %d", k);
 
     auto it = mmg2gmsh.find(ref);
-
     if(it == mmg2gmsh.end()) {
-      MVertex *v = new MVertex(cx, cy, cz, gr);
-      gr->mesh_vertices.push_back(v);
+      MVertex *v = new MVertex(cx, cy, cz, nullptr);
       kToMVertex[k] = v;
+      unattached.insert(v);
     }
-    else
+    else {
       kToMVertex[k] = it->second;
+
+      // A reused vertex previously owned by one of `regions` (dim 3) had
+      // its owning region's mesh_vertices cleared by refineMeshMMG's
+      // cleanup, even though the vertex object itself was spared from
+      // deletion (see the "reused" set there) -- it needs to be
+      // re-attached to whichever region ends up using it below, exactly
+      // like a brand-new vertex. Otherwise it becomes reachable from a
+      // tetrahedron but owned by no entity's mesh_vertices, silently
+      // corrupting node numbering: GModel::indexMeshVertices only assigns
+      // valid output node indices to vertices found via some entity's
+      // mesh_vertices, so an orphaned-but-referenced vertex keeps a stale
+      // index, and .msh files end up with elements pointing at nodes that
+      // were never declared.
+      GEntity *owner = it->second->onWhat();
+      if(owner && owner->dim() == 3 && tagToRegion.count(owner->tag()))
+        unattached.insert(it->second);
+    }
   }
 
-  // Store the tets from the Mmg structures into the Gmsh structures
+  // Store the tets from the Mmg structures into the Gmsh structures,
+  // routing each one to the GRegion matching its reference, and attaching
+  // any brand-new vertex to the first region found using it.
   for(int k = 1; k <= ne; k++) {
     int v1mmg, v2mmg, v3mmg, v4mmg;
     if(MMG3D_Get_tetrahedron(mmg, &v1mmg, &v2mmg, &v3mmg, &v4mmg, &ref,
@@ -68,9 +115,23 @@ static void MMG2gmsh(GRegion *gr, MMG5_pMesh mmg,
     MVertex *v4 = kToMVertex[v4mmg];
     if(!v1 || !v2 || !v3 || !v4) {
       Msg::Error("Mmg3d: unknown vertex in tetrahedron %d", k);
+      continue;
     }
-    else {
-      gr->tetrahedra.push_back(new MTetrahedron(v1, v2, v3, v4));
+
+    auto rit = tagToRegion.find(ref);
+    if(rit == tagToRegion.end()) {
+      Msg::Error("Mmg3d: tetrahedron %d has unknown region reference %d", k,
+                 ref);
+      continue;
+    }
+    GRegion *gr = rit->second;
+    gr->tetrahedra.push_back(new MTetrahedron(v1, v2, v3, v4));
+
+    for(MVertex *v : {v1, v2, v3, v4}) {
+      if(unattached.erase(v)) {
+        gr->mesh_vertices.push_back(v);
+        v->setEntity(gr);
+      }
     }
   }
 
@@ -97,38 +158,52 @@ static void MMG2gmsh(GRegion *gr, MMG5_pMesh mmg,
 #endif
 }
 
-static void gmsh2MMG(GRegion *gr, MMG5_pMesh mmg, MMG5_pSol sol,
-                     std::map<int, MVertex *> &mmg2gmsh)
+// Returns false if any Mmg "Set" call failed, meaning `mmg`/`sol` were left
+// partially initialized and must not be handed to MMG3D_mmg3dlib (doing so
+// can crash deep inside Mmg instead of failing cleanly).
+static bool gmsh2MMG(std::vector<GRegion *> &regions, MMG5_pMesh mmg,
+                     MMG5_pSol sol, std::map<int, MVertex *> &mmg2gmsh)
 {
-  // Count mesh vertices
+  bool ok = true;
+
+  // Count mesh vertices across all regions
   std::set<MVertex *> allVertices;
-  for(unsigned int i = 0; i < gr->tetrahedra.size(); i++) {
-    allVertices.insert(gr->tetrahedra[i]->getVertex(0));
-    allVertices.insert(gr->tetrahedra[i]->getVertex(1));
-    allVertices.insert(gr->tetrahedra[i]->getVertex(2));
-    allVertices.insert(gr->tetrahedra[i]->getVertex(3));
+  for(GRegion *gr : regions) {
+    for(std::size_t i = 0; i < gr->tetrahedra.size(); i++) {
+      allVertices.insert(gr->tetrahedra[i]->getVertex(0));
+      allVertices.insert(gr->tetrahedra[i]->getVertex(1));
+      allVertices.insert(gr->tetrahedra[i]->getVertex(2));
+      allVertices.insert(gr->tetrahedra[i]->getVertex(3));
+    }
   }
   int np = allVertices.size();
 
-  // Count boundary triangles
-  std::vector<GFace *> f = gr->faces();
+  // Boundary triangles: the union of all regions' bounding faces, so a
+  // face shared between two regions (an internal interface) is only set
+  // once; the differing tetrahedron references on either side (set below)
+  // are enough for Mmg to recognize and preserve it as a material
+  // interface on its own.
+  std::vector<GFace *> f = boundaryFaces(regions);
   int nt = 0;
-  for(auto it = f.begin(); it != f.end(); ++it) {
-    nt += (*it)->triangles.size();
-  }
+  for(auto it = f.begin(); it != f.end(); ++it) nt += (*it)->triangles.size();
 
   // TODO: also import mesh lines
 
   // Get mesh tetrahedra
-  int ne = gr->tetrahedra.size();
+  int ne = 0;
+  for(GRegion *gr : regions) ne += gr->tetrahedra.size();
 
-  if(MMG3D_Set_meshSize(mmg, np, ne, 0, nt, 0, 0) != 1)
+  if(MMG3D_Set_meshSize(mmg, np, ne, 0, nt, 0, 0) != 1) {
     Msg::Error("Mmg3d: unable to set mesh size");
+    return false;
+  }
 
-  if(MMG3D_Set_solSize(mmg, sol, MMG5_Vertex, np, MMG5_Tensor) != 1)
+  if(MMG3D_Set_solSize(mmg, sol, MMG5_Vertex, np, MMG5_Tensor) != 1) {
     Msg::Error("Mmg3d: unable to set metric size");
+    return false;
+  }
 
-  std::map<MVertex *, std::pair<double, int> > LCS;
+  std::map<MVertex *, std::pair<double, int>> LCS;
   for(auto it = f.begin(); it != f.end(); ++it) {
     for(unsigned int i = 0; i < (*it)->triangles.size(); i++) {
       MTriangle *t = (*it)->triangles[i];
@@ -151,10 +226,23 @@ static void gmsh2MMG(GRegion *gr, MMG5_pMesh mmg, MMG5_pSol sol,
   std::map<int, int> gmsh2mmg_num;
   for(auto it = allVertices.begin(); it != allVertices.end(); ++it) {
     if(MMG3D_Set_vertex(mmg, (*it)->x(), (*it)->y(), (*it)->z(),
-                        (*it)->getNum(), k) != 1)
+                        (*it)->getNum(), k) != 1) {
       Msg::Error("Mmg3d: unable to set vertex %d", k);
+      ok = false;
+    }
 
     gmsh2mmg_num[(*it)->getNum()] = k;
+
+    // Track every vertex's identity, independently of whether it also
+    // happens to lie on a boundary triangle (checked below via LCS): its
+    // Mmg ref was just set to getNum() above regardless, so MMG2gmsh must
+    // be able to recognize it as pre-existing either way. Conflating this
+    // with the LCS-gated metric-blending check below (as upstream does)
+    // means a vertex used only by tetrahedra, not registered on any GFace
+    // triangle, gets silently treated as brand-new on output -- creating a
+    // duplicate MVertex for one that already exists, and a double
+    // free/use-after-free once both copies get deleted.
+    mmg2gmsh[(*it)->getNum()] = *it;
 
     MVertex *v = *it;
     double U = 0, V = 0;
@@ -171,7 +259,6 @@ static void gmsh2MMG(GRegion *gr, MMG5_pMesh mmg, MMG5_pSol sol,
 
     auto itv = LCS.find(v);
     if(itv != LCS.end()) {
-      mmg2gmsh[(*it)->getNum()] = *it;
       // if (Extend2dMeshIn3dVolumes()){
       double LL = itv->second.first / itv->second.second;
       SMetric3 l4(1. / (LL * LL));
@@ -184,18 +271,28 @@ static void gmsh2MMG(GRegion *gr, MMG5_pMesh mmg, MMG5_pSol sol,
     if(MMG3D_Set_tensorSol(sol, m(0, 0), m(1, 0), m(2, 0), m(1, 1), m(2, 1),
                            m(2, 2), k) != 1) {
       Msg::Error("Mmg3d: unable to set solution %d", k);
+      ok = false;
     }
     k++;
   }
 
-  for(k = 1; k <= ne; k++) {
-    if(MMG3D_Set_tetrahedron(
-         mmg, gmsh2mmg_num[gr->tetrahedra[k - 1]->getVertex(0)->getNum()],
-         gmsh2mmg_num[gr->tetrahedra[k - 1]->getVertex(1)->getNum()],
-         gmsh2mmg_num[gr->tetrahedra[k - 1]->getVertex(2)->getNum()],
-         gmsh2mmg_num[gr->tetrahedra[k - 1]->getVertex(3)->getNum()], gr->tag(),
-         k) != 1)
-      Msg::Error("Mmg3d: unable to set tetrahedron %d", k);
+  k = 1;
+  for(GRegion *gr : regions) {
+    for(std::size_t i = 0; i < gr->tetrahedra.size(); i++) {
+      if(MMG3D_Set_tetrahedron(
+           mmg, gmsh2mmg_num[gr->tetrahedra[i]->getVertex(0)->getNum()],
+           gmsh2mmg_num[gr->tetrahedra[i]->getVertex(1)->getNum()],
+           gmsh2mmg_num[gr->tetrahedra[i]->getVertex(2)->getNum()],
+           gmsh2mmg_num[gr->tetrahedra[i]->getVertex(3)->getNum()], gr->tag(),
+           k) != 1) {
+        Msg::Error("Mmg3d: unable to set tetrahedron %d (region %d): "
+                   "degenerate (zero-volume) tetrahedron in the classified "
+                   "mesh",
+                   k, gr->tag());
+        ok = false;
+      }
+      k++;
+    }
   }
 
   k = 1;
@@ -205,19 +302,26 @@ static void gmsh2MMG(GRegion *gr, MMG5_pMesh mmg, MMG5_pSol sol,
            mmg, gmsh2mmg_num[(*it)->triangles[i]->getVertex(0)->getNum()],
            gmsh2mmg_num[(*it)->triangles[i]->getVertex(1)->getNum()],
            gmsh2mmg_num[(*it)->triangles[i]->getVertex(2)->getNum()],
-           (*it)->tag(), k) != 1)
+           (*it)->tag(), k) != 1) {
         Msg::Error("Mmg3d: unable to set triangle %d", k);
+        ok = false;
+      }
       k++;
     }
   }
+
+  return ok;
 }
 
-static void updateSizes(GRegion *gr, MMG5_pMesh mmg, MMG5_pSol sol,
-                        std::map<int, MVertex *> &mmg2gmsh)
+static void updateSizes(std::vector<GRegion *> &regions, MMG5_pMesh mmg,
+                        MMG5_pSol sol, std::map<int, MVertex *> &mmg2gmsh)
 {
-  std::vector<GFace *> f = gr->faces();
+  std::map<int, GRegion *> tagToRegion;
+  for(GRegion *gr : regions) tagToRegion[gr->tag()] = gr;
 
-  std::map<MVertex *, std::pair<double, int> > LCS;
+  std::vector<GFace *> f = boundaryFaces(regions);
+
+  std::map<MVertex *, std::pair<double, int>> LCS;
   // if (Extend2dMeshIn3dVolumes()){
   for(auto it = f.begin(); it != f.end(); ++it) {
     for(unsigned int i = 0; i < (*it)->triangles.size(); i++) {
@@ -238,24 +342,50 @@ static void updateSizes(GRegion *gr, MMG5_pMesh mmg, MMG5_pSol sol,
   }
   // }
 
-  int np;
+  int np, ne;
+  MMG3D_Get_meshSize(mmg, &np, &ne, nullptr, nullptr, nullptr, nullptr);
 
-  MMG3D_Get_meshSize(mmg, &np, nullptr, nullptr, nullptr, nullptr, nullptr);
+  // Determine, for every brand-new (interior) vertex with no pre-existing
+  // entity, which GRegion owns it via any tetrahedron using it: Mmg
+  // preserves the boundary between differently-referenced tetrahedra (see
+  // gmsh2MMG), so every tetrahedron touching a genuinely interior vertex
+  // shares the same reference, and any one of them suffices to identify the
+  // owning region.
+  std::vector<GRegion *> vertexRegion(np + 1, nullptr);
+  for(int k = 1; k <= ne; k++) {
+    int v1, v2, v3, v4, ref;
+    if(MMG3D_Get_tetrahedron(mmg, &v1, &v2, &v3, &v4, &ref, nullptr) != 1) {
+      // v1..v4 are left uninitialized on failure: skip rather than use them
+      // as (garbage) indices into vertexRegion below.
+      Msg::Error("Mmg3d: unable to get tetrahedron %d", k);
+      continue;
+    }
+    auto rit = tagToRegion.find(ref);
+    GRegion *owner = (rit != tagToRegion.end()) ? rit->second : nullptr;
+    for(int vv : {v1, v2, v3, v4}) {
+      if(vv >= 1 && vv <= np && !vertexRegion[vv]) vertexRegion[vv] = owner;
+    }
+  }
+
   for(int k = 1; k <= np; k++) {
     double cx, cy, cz;
     if(MMG3D_Get_vertex(mmg, &cx, &cy, &cz, nullptr, nullptr, nullptr) != 1)
       Msg::Error("Mmg3d: unable to get vertex %d", k);
 
-    SMetric3 m = BGM_MeshMetric(gr, 0, 0, cx, cy, cz);
-
     auto it = mmg2gmsh.find(k);
+    GEntity *ge = (it != mmg2gmsh.end() && it->second->onWhat()) ?
+                    it->second->onWhat() :
+                    static_cast<GEntity *>(vertexRegion[k]);
+    if(!ge) continue;
+
+    SMetric3 m = BGM_MeshMetric(ge, 0, 0, cx, cy, cz);
 
     if(it != mmg2gmsh.end() && Extend2dMeshIn3dVolumes()) {
       auto itv = LCS.find(it->second);
       if(itv != LCS.end()) {
         double LL = itv->second.first / itv->second.second;
-        SMetric3 l4(1. / (LL * LL));
         // printf("adding a size %g\n",LL);
+        SMetric3 l4(1. / (LL * LL));
         SMetric3 MM = intersection_conserve_mostaniso(l4, m);
         m = MM;
       }
@@ -272,8 +402,10 @@ static void updateSizes(GRegion *gr, MMG5_pMesh mmg, MMG5_pSol sol,
   }
 }
 
-void refineMeshMMG(GRegion *gr)
+void refineMeshMMG(std::vector<GRegion *> &regions)
 {
+  if(regions.empty()) return;
+
   MMG5_pMesh mmg = nullptr;
   MMG5_pSol sol = nullptr;
 
@@ -283,8 +415,15 @@ void refineMeshMMG(GRegion *gr)
   MMG3D_Init_mesh(MMG5_ARG_start, MMG5_ARG_ppMesh, &mmg, MMG5_ARG_ppMet, &sol,
                   MMG5_ARG_end);
 
-  // Store the Gmsh mesh into the Mmg structures
-  gmsh2MMG(gr, mmg, sol, mmg2gmsh);
+  // Store the Gmsh mesh (all regions at once) into the Mmg structures
+  if(!gmsh2MMG(regions, mmg, sol, mmg2gmsh)) {
+    Msg::Error("Mmg3d: failed to build the input mesh (see above); leaving "
+               "the classified mesh unrefined instead of handing a "
+               "partially-built mesh to Mmg3d");
+    MMG3D_Free_all(MMG5_ARG_start, MMG5_ARG_ppMesh, &mmg, MMG5_ARG_ppMet, &sol,
+                   MMG5_ARG_end);
+    return;
+  }
 
   int iterMax = 10;
 
@@ -305,13 +444,22 @@ void refineMeshMMG(GRegion *gr)
     if(MMG3D_Set_iparameter(mmg, sol, MMG3D_IPARAM_verbose, verb_mmg) != 1)
       Msg::Error("Mmsg3d: unable to set verbosity");
 
-    // Set the nosurf parameter to 1 to preserve the boundaries
+    // Set the nosurf parameter to 1 to preserve the boundaries. This also
+    // preserves the interfaces between differently-referenced regions: by
+    // default (opnbdy off), Mmg already treats any triangle between two
+    // tetrahedra of different references as a boundary to keep, so a
+    // multi-region mesh remeshed in one combined call still has its
+    // internal material interfaces respected.
     if(MMG3D_Set_iparameter(mmg, sol, MMG3D_IPARAM_nosurf, 1) != 1)
       Msg::Error("Mmg3d: unable to preserve the boundaries");
 
-    // Set the hausdorff parameter
+    // Set the hausdorff parameter, scaled by the largest region's bounding
+    // box (matches the previous per-region behaviour when there is only
+    // one region).
     double sqrt3Inv = 0.57735026919;
-    double hausd = 0.01 * sqrt3Inv * gr->bounds().diag();
+    double diag = 0;
+    for(GRegion *gr : regions) diag = std::max(diag, gr->bounds().diag());
+    double hausd = 0.01 * sqrt3Inv * diag;
 
     if(MMG3D_Set_dparameter(mmg, sol, MMG3D_DPARAM_hausd, hausd) != 1) {
       Msg::Error("Mmg3d: unable to set the hausdorff parameter");
@@ -326,7 +474,7 @@ void refineMeshMMG(GRegion *gr)
                 np, nTnow);
 
       // Here we should interact with BGM
-      updateSizes(gr, mmg, sol, mmg2gmsh);
+      updateSizes(regions, mmg, sol, mmg2gmsh);
 
       if(fabs((double)(nTnow - nT)) < 0.05 * nT) break;
     }
@@ -338,16 +486,28 @@ void refineMeshMMG(GRegion *gr)
   MMG3D_saveSol(mmg, sol, test);
 #endif
 
-  gr->deleteVertexArrays();
-  for(unsigned int i = 0; i < gr->tetrahedra.size(); ++i)
-    delete gr->tetrahedra[i];
-  gr->tetrahedra.clear();
-  for(unsigned int i = 0; i < gr->mesh_vertices.size(); ++i)
-    delete gr->mesh_vertices[i];
-  gr->mesh_vertices.clear();
+  // Vertices tracked in mmg2gmsh are about to be reused as-is by MMG2gmsh
+  // below (found by their Mmg ref rather than recreated); a region-owned
+  // (dim 3) vertex can be tracked there too if it also happens to lie on a
+  // boundary triangle, so it must not be deleted here even though it's
+  // currently listed in some region's mesh_vertices.
+  std::set<MVertex *> reused;
+  for(auto &kv : mmg2gmsh) reused.insert(kv.second);
 
-  // Store the Mmg mesh into the Gmsh structures
-  MMG2gmsh(gr, mmg, mmg2gmsh);
+  for(GRegion *gr : regions) {
+    gr->deleteVertexArrays();
+    for(unsigned int i = 0; i < gr->tetrahedra.size(); ++i)
+      delete gr->tetrahedra[i];
+    gr->tetrahedra.clear();
+    for(unsigned int i = 0; i < gr->mesh_vertices.size(); ++i) {
+      if(!reused.count(gr->mesh_vertices[i])) delete gr->mesh_vertices[i];
+    }
+    gr->mesh_vertices.clear();
+  }
+
+  // Store the Mmg mesh into the Gmsh structures, routing each tetrahedron
+  // and vertex back to its owning region
+  MMG2gmsh(regions, mmg, mmg2gmsh);
 
   // Free the Mmg structure
   MMG3D_Free_all(MMG5_ARG_start, MMG5_ARG_ppMesh, &mmg, MMG5_ARG_ppMet, &sol,
@@ -356,7 +516,7 @@ void refineMeshMMG(GRegion *gr)
 
 #else
 
-void refineMeshMMG(GRegion *gr)
+void refineMeshMMG(std::vector<GRegion *> &regions)
 {
   Msg::Warning("This version of Gmsh is not compiled with MMG support: "
                "skipping refinement");

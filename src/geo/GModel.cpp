@@ -75,7 +75,7 @@ GModel::GModel(const std::string &name)
     _occ_internals(nullptr), _acis_internals(nullptr),
     _parasolid_internals(nullptr), _fields(nullptr),
     _currentMeshEntity(nullptr), _numPartitions(0), normals(nullptr),
-    lcCallback(nullptr)
+    lcCallback(nullptr), lcMetricCallback(nullptr)
 {
   _maxVertexNum = CTX::instance()->mesh.firstNodeTag - 1;
   _maxElementNum = CTX::instance()->mesh.firstElementTag - 1;
@@ -1052,9 +1052,23 @@ void GModel::getInnerPhysicalNamesIterators(std::vector<piter> &iterators)
 
 int GModel::setPhysicalName(const std::string &name, int dim, int number)
 {
-  // check if the name is already used
-  int findPhy = getPhysicalNumber(dim, name);
-  if(findPhy != -1) return findPhy;
+  if (!number) {
+    // check if the name is already used
+    int findPhy = getPhysicalNumber(dim, name);
+    if(findPhy != -1) return findPhy;
+  }
+  else {
+    auto findName = getPhysicalName(dim, number);
+    if (findName == name) {
+      return number;
+    }
+    else if (findName != "") {
+      Msg::Warning("Discarding physical name '%s': name '%s' already assigned "
+                   "to entity of dimension %i and tag %i", name.c_str(),
+                   findName.c_str(), dim, number);
+      return number;
+    }
+  }
 
   // if no number is given, find the next available one
   if(!number) number = getMaxPhysicalNumber(dim) + 1;
@@ -1474,11 +1488,10 @@ int GModel::adaptMesh(std::vector<int> technique,
         }
       }
       else if(getDim() == 3) {
-        for(auto rit = firstRegion(); rit != lastRegion(); ++rit) {
-          refineMeshMMG(*rit);
-          if(_elementOctree) delete _elementOctree;
-          _elementOctree = nullptr;
-        }
+        std::vector<GRegion *> allRegions(firstRegion(), lastRegion());
+        refineMeshMMG(allRegions);
+        if(_elementOctree) delete _elementOctree;
+        _elementOctree = nullptr;
       }
 
       char name[256];

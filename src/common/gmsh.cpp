@@ -2150,7 +2150,9 @@ GMSH_API void gmsh::model::mesh::reclassifyNodes()
   GModel::current()->pruneMeshVertexAssociations();
 }
 
-GMSH_API void gmsh::model::mesh::relocateNodes(const int dim, const int tag)
+GMSH_API void gmsh::model::mesh::relocateNodes(const int dim, const int tag,
+                                               const std::vector<double> &min,
+                                               const std::vector<double> &max)
 {
   if(!_checkInit()) return;
   std::vector<GEntity *> entities;
@@ -2166,7 +2168,7 @@ GMSH_API void gmsh::model::mesh::relocateNodes(const int dim, const int tag)
     GModel::current()->getEntities(entities, dim);
   }
   for(std::size_t i = 0; i < entities.size(); i++)
-    entities[i]->relocateMeshVertices();
+    entities[i]->relocateMeshVertices(min, max);
 }
 
 static void
@@ -5091,16 +5093,30 @@ GMSH_API void gmsh::model::mesh::setSizeAtParametricPoints(
 }
 
 GMSH_API void gmsh::model::mesh::setSizeCallback(
-  std::function<double(int, int, double, double, double, double)> callback)
+  std::function<double(int, int, double, double, double, double)> sizeCallback)
 {
   if(!_checkInit()) return;
-  GModel::current()->lcCallback = callback;
+  GModel::current()->lcCallback = sizeCallback;
 }
 
 GMSH_API void gmsh::model::mesh::removeSizeCallback()
 {
   if(!_checkInit()) return;
   GModel::current()->lcCallback = nullptr;
+}
+
+GMSH_API void gmsh::model::mesh::setMetricCallback(
+  std::function<void(int, int, double, double, double, double, double *)>
+    metricCallback)
+{
+  if(!_checkInit()) return;
+  GModel::current()->lcMetricCallback = metricCallback;
+}
+
+GMSH_API void gmsh::model::mesh::removeMetricCallback()
+{
+  if(!_checkInit()) return;
+  GModel::current()->lcMetricCallback = nullptr;
 }
 
 GMSH_API void
@@ -8588,6 +8604,21 @@ GMSH_API void gmsh::algorithm::tetrahedralize(
   for(std::size_t i = 0; i < tets.size(); i++) delete tets[i];
 #else
   Msg::Error("Tetrahedralize requires the mesh module");
+#endif
+}
+
+GMSH_API void gmsh::algorithm::refineTetrahedra(
+  const std::vector<double> &coord, const std::vector<double> &sizeAtNode,
+  const std::vector<std::size_t> &tetraIn, std::vector<double> &steiner,
+  std::vector<std::size_t> &tetraOut)
+{
+  if(!_checkInit())
+    return;
+
+#if defined(HAVE_MESH)
+  refineTetrahedraHxt(coord, sizeAtNode, tetraIn, steiner, tetraOut);
+#else
+  Msg::Error("RefineTetrahedra requires the mesh module");
 #endif
 }
 

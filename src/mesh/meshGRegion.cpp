@@ -31,6 +31,103 @@
 #include "ExtrudeParams.h"
 #include "OS.h"
 #include "Context.h"
+#include "SVector3.h"
+#include <algorithm>
+#include <cmath>
+
+namespace {
+
+// Average edge length of a tetrahedron, used as its local length scale.
+double tetCharacteristicLength(MTetrahedron *t)
+{
+  double sum = 0;
+  int n = 0;
+  for(int i = 0; i < 4; i++) {
+    for(int j = i + 1; j < 4; j++) {
+      sum += t->getVertex(i)->distance(t->getVertex(j));
+      n++;
+    }
+  }
+  return n > 0 ? sum / n : 0;
+}
+
+// Repair near-zero-volume ("sliver") tetrahedra left over from boundary
+// recovery by nudging one free (dim 3) vertex slightly off the plane of the
+// other three. A handful of these can occur at numerically hard multi-way
+// junctions between facets (more than two regions/facets meeting at a
+// segment); Mmg3d flatly rejects any zero-volume tetrahedron as input
+// rather than tolerating and later fixing it like it does other
+// poor-quality elements, so such a tetrahedron must be repaired (or at
+// least attempted) before reaching it.
+//
+// Tetrahedra with all 4 vertices constrained to a curve or surface (no
+// free dim-3 vertex to move) are left untouched: repairing those would
+// require moving a boundary vertex, which is out of scope here.
+int repairSliverTetrahedra(GRegion *gr)
+{
+  // Reference length for detecting genuine degeneracy: the model's own
+  // bounding box, not the tetrahedron's own edge lengths. An anisotropic
+  // mesh legitimately contains many very flat tetrahedra (tiny volume
+  // relative to their longest edge cubed), so comparing against the
+  // tetrahedron's own size would flag those too; a truly degenerate
+  // (near-coplanar) tetrahedron instead has a volume near floating-point
+  // round-off relative to the coordinates involved, regardless of its
+  // aspect ratio.
+  SBoundingBox3d bbox = gr->bounds();
+  double modelScale = bbox.diag();
+  if(modelScale <= 0) modelScale = 1.;
+  double volEps = 1.e-10 * modelScale * modelScale * modelScale;
+
+  int nFixed = 0;
+  for(MTetrahedron *t : gr->tetrahedra) {
+    double L = tetCharacteristicLength(t);
+    if(L <= 0) continue;
+    double vol = std::fabs(t->getVolume());
+    if(vol > volEps) continue; // not degenerate
+
+    // Prefer the least-constrained vertex (highest dim() first): moving a
+    // free interior (dim 3) point is exact, moving one on a curve/surface
+    // is a tiny approximation (it ends up slightly off the exact CAD
+    // geometry), but degenerate tetrahedra from segment/facet Steiner
+    // point insertion typically have all 4 vertices boundary-constrained,
+    // so requiring a dim-3 vertex would leave them all unrepaired.
+    MVertex *victim = nullptr;
+    int victimDim = -1;
+    for(int i = 0; i < 4; i++) {
+      MVertex *v = t->getVertex(i);
+      int dim = v->onWhat() ? v->onWhat()->dim() : -1;
+      if(dim > victimDim) {
+        victim = v;
+        victimDim = dim;
+      }
+    }
+    if(!victim) continue;
+
+    MVertex *a = nullptr, *b = nullptr, *c = nullptr;
+    for(int i = 0; i < 4; i++) {
+      MVertex *v = t->getVertex(i);
+      if(v == victim) continue;
+      if(!a) a = v;
+      else if(!b) b = v;
+      else c = v;
+    }
+
+    SVector3 ab(b->x() - a->x(), b->y() - a->y(), b->z() - a->z());
+    SVector3 ac(c->x() - a->x(), c->y() - a->y(), c->z() - a->z());
+    SVector3 normal = crossprod(ab, ac);
+    if(normal.norm() <= 0) continue;
+    normal.normalize();
+
+    double eps = 1.e-4 * L;
+    victim->setXYZ(victim->x() + eps * normal.x(),
+                   victim->y() + eps * normal.y(),
+                   victim->z() + eps * normal.z());
+    nFixed++;
+  }
+  return nFixed;
+}
+
+} // namespace
 
 void splitQuadRecovery::add(const MFace &f, MVertex *v, GFace *gf)
 {
@@ -236,9 +333,33 @@ void MeshDelaunayVolume(std::vector<GRegion *> &regions)
 
   // now do insertion of points
   if(CTX::instance()->mesh.algo3d == ALGO_3D_MMG3D) {
-    for(std::size_t i = 0; i < regions.size(); i++) {
-      refineMeshMMG(regions[i]);
+    // Classify the (possibly merged, if regions share a boundary) Delaunay
+    // tetrahedra back onto their individual GRegion. maxIter=1 with a huge
+    // radius target makes this call classify only, without inserting any
+    // new point. All regions are then handed to Mmg3d together in a single
+    // call (see refineMeshMMG), tagged with their region so that Mmg
+    // preserves the interfaces between them as material boundaries; this
+    // avoids relying on each region's boundary-recovered triangulation
+    // being independently self-consistent, which can break down at
+    // junctions shared by more than two regions.
+    // Iterate: nudging a vertex shared by several tetrahedra to fix one
+    // sliver can leave (or reveal) another degenerate one touching it, so
+    // a single pass isn't always enough. Stop once a pass finds nothing
+    // left to fix, or after a bounded number of rounds to avoid looping
+    // forever on a case this simple repair can't actually resolve.
+    int nSliversFixedTotal = 0;
+    for(int round = 0; round < 10; round++) {
+      int nSliversFixed = repairSliverTetrahedra(gr);
+      if(nSliversFixed == 0) break;
+      nSliversFixedTotal += nSliversFixed;
     }
+    if(nSliversFixedTotal > 0) {
+      Msg::Info("Repaired %d sliver tetrahedron%s left over from boundary "
+                "recovery",
+                nSliversFixedTotal, (nSliversFixedTotal > 1) ? "s" : "");
+    }
+    insertVerticesInRegion(gr, 1, 1.e300, true, &sqr);
+    refineMeshMMG(regions);
   }
   else if(CTX::instance()->mesh.algo3d != ALGO_3D_INITIAL_ONLY &&
 	  CTX::instance()->mesh.algo3d != ALGO_3D_RTREE) {

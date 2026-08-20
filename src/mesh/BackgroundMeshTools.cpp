@@ -41,7 +41,7 @@ static double max_edge_curvature(const GVertex *gv)
   return val;
 }
 
-// the mesh vertex is classified on a model vertex.  we compute the maximum of
+// the mesh vertex is classified on a model vertex. we compute the maximum of
 // the curvature of model faces surrounding this point if it is classified on a
 // model edge, we do the same for all model faces surrounding it if it is on a
 // model face, we compute the curvature at this location
@@ -241,11 +241,27 @@ double BGM_MeshSizeWithoutScaling(GEntity *ge, double U, double V, double X,
   // take the minimum
   double lc = std::min(std::min(std::min(std::min(l1, l2), l3), l4), l5);
 
-  // lc from callback
+  // lc from callback (prefer lc direct instead of from metric)
   if(GModel::current()->lcCallback) {
     int dim = (ge ? ge->dim() : -1);
     int tag = (ge ? ge->tag() : -1);
     lc = GModel::current()->lcCallback(dim, tag, X, Y, Z, lc);
+  }
+  else if(GModel::current()->lcMetricCallback) {
+    int dim = (ge ? ge->dim() : -1);
+    int tag = (ge ? ge->tag() : -1);
+    SMetric3 cb(1. / (lc * lc));
+    GModel::current()->lcMetricCallback(dim, tag, X, Y, Z, lc, cb.data());
+
+    // if the callback was modified, it might be anisotropic
+    double m_mat[3][3] = {{cb(0, 0), cb(0, 1), cb(0, 2)},
+                          {cb(1, 0), cb(1, 1), cb(1, 2)},
+                          {cb(2, 0), cb(2, 1), cb(2, 2)}};
+
+    double ev[3];
+    eigenvalue(m_mat, ev);
+    double max_eig = std::max(std::max(ev[0], ev[1]), ev[2]);
+    if(max_eig > 0) lc = 1. / std::sqrt(max_eig);
   }
 
   return lc;
@@ -298,6 +314,13 @@ SMetric3 BGM_MeshMetric(GEntity *ge, double U, double V, double X, double Y,
   lc = std::max(lc, CTX::instance()->mesh.lcMin);
   lc = std::min(lc, CTX::instance()->mesh.lcMax);
 
+  // if we don't override it later anyways, we might as well use the callback
+  if(GModel::current()->lcCallback and !GModel::current()->lcMetricCallback) {
+    int dim = (ge ? ge->dim() : -1);
+    int tag = (ge ? ge->tag() : -1);
+    lc = GModel::current()->lcCallback(dim, tag, X, Y, Z, lc);
+  }
+
   if(lc <= 0.) {
     Msg::Error("Wrong mesh element size lc = %g (lcmin = %g, lcmax = %g)", lc,
                CTX::instance()->mesh.lcMin, CTX::instance()->mesh.lcMax);
@@ -327,6 +350,13 @@ SMetric3 BGM_MeshMetric(GEntity *ge, double U, double V, double X, double Y,
   SMetric3 m = (CTX::instance()->mesh.lcFromCurvature > 0 && ge->dim() < 3) ?
                  intersection(m1, LC_MVertex_CURV_ANISO(ge, U, V)) :
                  m1;
+
+  // lc or metric from callback
+  if(GModel::current()->lcMetricCallback) {
+    int dim = (ge ? ge->dim() : -1);
+    int tag = (ge ? ge->tag() : -1);
+    GModel::current()->lcMetricCallback(dim, tag, X, Y, Z, lc, m.data());
+  }
 
   // apply global size factor
   if(CTX::instance()->mesh.lcFactor != 0 &&

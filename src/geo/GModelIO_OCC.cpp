@@ -39,6 +39,7 @@
 #include <BRepBuilderAPI_NurbsConvert.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFill_CurveConstraint.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -4099,28 +4100,25 @@ bool OCC_Internals::booleanOperator(
   }
   else {
     // otherwise, try to preserve the numbering of the input shapes that did not
-    // change, or that were replaced by a single shape. Entities must be
-    // processed in ascending dimension order so that lower-dimensional boundary
-    // entities get their tags preserved before higher-dimensional entities can
-    // claim them via recursive _unbind.
-    bool sorted = std::is_sorted(
-      inDimTags.begin(), inDimTags.end(),
-      [](const auto &a, const auto &b) { return a.first < b.first; });
-    std::vector<std::size_t> dimOrder;
-    if(!sorted) {
-      Msg::Warning("Reordering %d entities by ascending dimension for boolean "
-                   "tag preservation; provide entities in ascending dimension "
-                   "order to avoid this overhead", (int)inDimTags.size());
-      dimOrder.resize(inDimTags.size());
-      std::iota(dimOrder.begin(), dimOrder.end(), 0);
-      std::stable_sort(dimOrder.begin(), dimOrder.end(),
-                       [&inDimTags](auto a, auto b) {
-                         return inDimTags[a].first < inDimTags[b].first;
-                       });
-    }
+    // change, or that were replaced by a single shape.
+    // Two-pass: first mark unmodified entities for preservation, then
+    // unbind/rebind in descending dimension order so that _unbind safety
+    // checks don't block on still-bound parent entities.
     _toPreserve.clear();
-    for(std::size_t ii = 0; ii < inDimTags.size(); ii++) {
-      std::size_t i = sorted ? ii : dimOrder[ii];
+    for(std::size_t i = 0; i < inDimTags.size(); i++) {
+      if(!mapDeleted[i] && mapModified[i].Extent() == 0) {
+        _toPreserve.insert(
+          std::make_pair(inDimTags[i].first, inDimTags[i].second));
+      }
+    }
+    std::vector<std::size_t> order(inDimTags.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(),
+      [&](std::size_t a, std::size_t b) {
+        return inDimTags[a].first > inDimTags[b].first;
+      });
+    for(std::size_t idx = 0; idx < order.size(); idx++) {
+      std::size_t i = order[idx];
       int dim = inDimTags[i].first;
       int tag = inDimTags[i].second;
       bool remove = (i < numObjects) ? removeObject : removeTool;
@@ -4133,8 +4131,7 @@ bool OCC_Internals::booleanOperator(
         }
         Msg::Debug("BOOL (%d,%d) deleted", dim, tag);
       }
-      else if(mapModified[i].Extent() == 0) { // not modified
-        _toPreserve.insert(std::make_pair(dim, tag));
+      else if(mapModified[i].Extent() == 0) { // not modified (handled in pass 1)
         Msg::Debug("BOOL (%d,%d) not modified", dim, tag);
       }
       else if(mapModified[i].Extent() == 1) { // replaced by single one
@@ -4176,7 +4173,10 @@ bool OCC_Internals::booleanOperator(
     std::pair<int, int> dimTag(dim, tag);
     std::vector<std::pair<int, int>> dimTags;
     if(mapModified[i].Extent() == 0) { // not modified
-      if(_isBound(dim, tag)) dimTags.push_back(dimTag);
+      if(_isBound(dim, mapOriginal[i])) {
+        int t = _find(dim, mapOriginal[i]);
+        dimTags.push_back(std::make_pair(dim, t));
+      }
     }
     else {
       NCollection_List<TopoDS_Shape>::Iterator it(mapModified[i]);
@@ -5545,12 +5545,28 @@ bool OCC_Internals::getClosestEntities(
       return false;
     }
     TopoDS_Shape shape = _find(e.first, e.second);
-    BRepExtrema_DistShapeShape dist(vertex, shape);
-    if(dist.IsDone() && dist.NbSolution() > 0) {
-      gp_Pnt p2 = dist.PointOnShape2(1);
-      std::tuple<int, int, double, double, double> t{e.first, e.second, p2.X(),
-                                                     p2.Y(), p2.Z()};
-      d.insert(std::make_pair(dist.Value(), t));
+    // BRepExtrema_DistShapeShape.InnerSolution() does not seem to work
+    // reliably: manually check if point is inside first, in which case we
+    // return a zero distance
+    bool inside = false;
+    if(e.first == 3) {
+      BRepClass3d_SolidClassifier solidClassifier(shape);
+      solidClassifier.Perform(aPnt, CTX::instance()->geom.tolerance);
+      const TopAbs_State state = solidClassifier.State();
+      inside = (state == TopAbs_IN || state == TopAbs_ON);
+    }
+    if(inside) {
+      std::tuple<int, int, double, double, double> t{e.first, e.second, x, y, z};
+      d.insert(std::make_pair(0., t));
+    }
+    else {
+      BRepExtrema_DistShapeShape dist(vertex, shape);
+      if(dist.IsDone() && dist.NbSolution() > 0) {
+        gp_Pnt p2 = dist.PointOnShape2(1);
+        std::tuple<int, int, double, double, double> t{e.first, e.second, p2.X(),
+                                                       p2.Y(), p2.Z()};
+        d.insert(std::make_pair(dist.Value(), t));
+      }
     }
   }
 

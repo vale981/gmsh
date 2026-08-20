@@ -921,6 +921,104 @@ def iargcargv():
     return a
 
 
+def isizemetricfun(name):
+    a = arg(name, None, None, None, "", "", False)
+    a.cpp = "std::function<void(int, int, double, double, double, double, double *)> " + name
+    a.c_arg = ("std::bind(&" + name + "_caller_::call, std::placeholders::_1, " +
+               "std::placeholders::_2, std::placeholders::_3, " +
+               "std::placeholders::_4, std::placeholders::_5, " +
+               "std::placeholders::_6, std::placeholders::_7, " +
+               name + "_data, " + name + ")")
+    a.c = ("void (*" + name + ")" +
+           "(int dim, int tag, double x, double y, double z, double lc, " +
+           "double * metric, void * data), " +
+           "void * " + name + "_data")
+    a.c_pre = "struct " + name + """_caller_  {
+          static void call(int dim, int tag, double x, double y, double z, double lc, double *metric, void * callbackp_, void (*cb_)(int, int, double, double, double, double, double*, void*)) {
+            cb_(dim, tag, x, y, z, lc, metric, callbackp_);
+          }
+        };\n"""
+    a.cwrap_pre = a.c_pre
+    a.python_pre = (
+        "global api_" + name + "_type_\n" +
+        "            api_" + name + "_type_ = CFUNCTYPE(None, c_int, c_int, c_double, c_double, c_double, c_double, POINTER(c_double), c_void_p)\n" +
+        "            def " + name + "_wrapper(dim, tag, x, y, z, lc, metric, data):\n" +
+        "                try:\n" +
+        "                    import numpy as np\n" +
+        "                    c_m = np.ctypeslib.as_array(metric, shape=(6,))\n" +
+        "                except Exception:\n" +
+        "                    c_m = [metric[i] for i in range(6)]\n" +
+        "                res = " + name + "(dim, tag, x, y, z, lc, c_m)\n" +
+        "                if res is None: return\n" +
+        "                if isinstance(res, (float, int)): \n" +
+        "                    for i in range(6): metric[i] = 0.\n" +
+        "                    metric[0] = metric[2] = metric[5] = 1. / (res * res)\n" +
+        "                else:\n" +
+        "                    try:\n" +
+        "                        n = len(res)\n" +
+        "                        if n == 6:\n" +
+        "                            for i in range(6): metric[i] = res[i]\n" +
+        "                        elif n == 3 and len(res[0]) == 3:\n" +
+        "                            metric[0] = res[0][0]\n" +
+        "                            metric[1] = res[1][0]\n" +
+        "                            metric[2] = res[1][1]\n" +
+        "                            metric[3] = res[2][0]\n" +
+        "                            metric[4] = res[2][1]\n" +
+        "                            metric[5] = res[2][2]\n" +
+        "                        else:\n" +
+        "                            val = res[0]\n" +
+        "                            for i in range(6): metric[i] = 0.\n" +
+        "                            metric[0] = metric[2] = metric[5] = 1. / (val * val)\n" +
+        "                    except Exception:\n" +
+        "                        for i in range(6): metric[i] = 0.\n" +
+        "                        metric[0] = metric[2] = metric[5] = 1. / (res * res)\n" +
+        "            global api_" + name + "_\n" +
+        "            api_" + name + "_ = api_" + name + "_type_(" + name + "_wrapper)")
+    a.python_arg = "api_" + name + "_, None"
+    a.julia_pre = (
+        "function api_" + name + "__(dim::Cint, tag::Cint, x::Cdouble, y::Cdouble, z::Cdouble, lc::Cdouble, metric::Ptr{Cdouble}, data::Ptr{Cvoid})\n" +
+        "        c_m = unsafe_wrap(Array, metric, 6)\n" +
+        "        res = " + name + "(dim, tag, x, y, z, lc, c_m)\n" +
+        "        if res === nothing\n" +
+        "            # nothing to do: c_m was modified in place\n" +
+        "        elseif res isa AbstractVector && length(res) == 6\n" +
+        "            unsafe_copyto!(metric, pointer(convert(Vector{Cdouble}, res)), 6)\n" +
+        "        elseif res isa AbstractMatrix && size(res) == (3, 3)\n" +
+        "            unsafe_store!(metric, convert(Cdouble, res[1,1]), 1)\n" +
+        "            unsafe_store!(metric, convert(Cdouble, res[2,1]), 2)\n" +
+        "            unsafe_store!(metric, convert(Cdouble, res[2,2]), 3)\n" +
+        "            unsafe_store!(metric, convert(Cdouble, res[3,1]), 4)\n" +
+        "            unsafe_store!(metric, convert(Cdouble, res[3,2]), 5)\n" +
+        "            unsafe_store!(metric, convert(Cdouble, res[3,3]), 6)\n" +
+        "        elseif res isa AbstractVector && length(res) >= 1\n" +
+        "            val = convert(Cdouble, res[1])\n" +
+        "            unsafe_store!(metric, 1./(val*val), 1)\n" +
+        "            unsafe_store!(metric, 0., 2)\n" +
+        "            unsafe_store!(metric, 1./(val*val), 3)\n" +
+        "            unsafe_store!(metric, 0., 4)\n" +
+        "            unsafe_store!(metric, 0., 5)\n" +
+        "            unsafe_store!(metric, 1./(val*val), 6)\n" +
+        "        elseif res isa Number\n" +
+        "            val = convert(Cdouble, res)\n" +
+        "            unsafe_store!(metric, 1./(val*val), 1)\n" +
+        "            unsafe_store!(metric, 0., 2)\n" +
+        "            unsafe_store!(metric, 1./(val*val), 3)\n" +
+        "            unsafe_store!(metric, 0., 4)\n" +
+        "            unsafe_store!(metric, 0., 5)\n" +
+        "            unsafe_store!(metric, 1./(val*val), 6)\n" +
+        "        end\n" +
+        "        return nothing\n" +
+        "    end\n" +
+        "    api_" + name + "_ = @cfunction($api_" + name + "__, Cvoid, (Cint, Cint, Cdouble, Cdouble, Cdouble, Cdouble, Ptr{Cdouble}, Ptr{Cvoid}))")
+    a.julia_arg = "api_" + name + "_, C_NULL"
+    a.julia_ctype = "Ptr{Cvoid}, Ptr{Cvoid}"
+    a.fortran_args = [name]
+    a.fortran_types = ["type(c_funptr), value, intent(in)"]
+    a.fortran_c_api = ["type(c_funptr), value, intent(in)"]
+    a.fortran_c_args = [name]
+    return a
+
+
 def isizefun(name):
     a = arg(name, None, None, None, "", "", False)
     a.cpp = "std::function<double(int, int, double, double, double, double)> " + name
@@ -999,6 +1097,7 @@ cpp_header = """// {0}
 
 #include <cmath>
 #include <vector>
+#include <array>
 #include <string>
 #include <utility>
 #include <functional>
@@ -1155,6 +1254,7 @@ cwrap_header = """// {0}
 
 #include <cmath>
 #include <vector>
+#include <array>
 #include <string>
 #include <utility>
 #include <functional>

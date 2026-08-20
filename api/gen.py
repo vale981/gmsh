@@ -353,8 +353,8 @@ mesh.add('addNodes', doc, None, iint('dim'), iint('tag'), ivectorsize('nodeTags'
 doc = '''Reclassify all nodes on their associated model entity, based on the elements. Can be used when importing nodes in bulk (e.g. by associating them all to a single volume), to reclassify them correctly on model surfaces, curves, etc. after the elements have been set.'''
 mesh.add('reclassifyNodes', doc, None)
 
-doc = '''Relocate the nodes classified on the entity of dimension `dim' and tag `tag' using their parametric coordinates. If `tag' < 0, relocate the nodes for all entities of dimension `dim'. If `dim' and `tag' are negative, relocate all the nodes in the mesh.'''
-mesh.add('relocateNodes', doc, None, iint('dim', '-1'), iint('tag', '-1'))
+doc = '''Relocate the nodes classified on the entity of dimension `dim' and tag `tag' using their parametric coordinates. If `tag' < 0, relocate the nodes for all entities of dimension `dim'. If `dim' and `tag' are negative, relocate all the nodes in the mesh. Optional `min' and `max' vectors (of length == `dim') can be provided to linearly rescale each parametric coordinate in the new parameter range, based on the provided one.'''
+mesh.add('relocateNodes', doc, None, iint('dim', '-1'), iint('tag', '-1'), ivectordouble('min', 'std::vector<double>()', '[]', '[]'), ivectordouble('max', 'std::vector<double>()', '[]', '[]'))
 
 doc = '''Get the elements classified on the entity of dimension `dim' and tag `tag'. If `tag' < 0, get the elements for all entities of dimension `dim'. If `dim' and `tag' are negative, get all the elements in the mesh. `elementTypes' contains the MSH types of the elements (e.g. `2' for 3-node triangles: see `getElementProperties' to obtain the properties for a given element type). `elementTags' is a vector of the same length as `elementTypes'; each entry is a vector containing the tags (unique, strictly positive identifiers) of the elements of the corresponding type. `nodeTags' is also a vector of the same length as `elementTypes'; each entry is a vector of length equal to the number of elements of the given type times the number N of nodes for this type of element, that contains the node tags of all the elements of the given type, concatenated: [e1n1, e1n2, ..., e1nN, e2n1, ...].'''
 mesh.add('getElements', doc, None, ovectorint('elementTypes'), ovectorvectorsize('elementTags'), ovectorvectorsize('nodeTags'), iint('dim', '-1'), iint('tag', '-1'))
@@ -486,10 +486,16 @@ doc = '''Set mesh size constraints at the given parametric points `parametricCoo
 mesh.add('setSizeAtParametricPoints', doc, None, iint('dim'), iint('tag'), ivectordouble('parametricCoord'), ivectordouble('sizes'))
 
 doc = '''Set a mesh size callback for the current model. The callback function should take six arguments as input (`dim', `tag', `x', `y', `z' and `lc'). The first two integer arguments correspond to the dimension `dim' and tag `tag' of the entity being meshed. The next four double precision arguments correspond to the coordinates `x', `y' and `z' around which to prescribe the mesh size and to the mesh size `lc' that would be prescribed if the callback had not been called. The callback function should return a double precision number specifying the desired mesh size; returning `lc' is equivalent to a no-op.'''
-mesh.add('setSizeCallback', doc, None, isizefun('callback'))
+mesh.add('setSizeCallback', doc, None, isizefun('sizeCallback'))
 
 doc = '''Remove the mesh size callback from the current model.'''
 mesh.add('removeSizeCallback', doc, None)
+
+doc = '''Set a mesh size callback for the current model. The callback function should take seven arguments as input (`dim', `tag', `x', `y', `z', `lc' and `metric'). The first two integer arguments correspond to the dimension `dim' and tag `tag' of the entity being meshed. The next four double precision arguments correspond to the coordinates `x', `y' and `z' around which to prescribe the mesh size and to the mesh size `lc' that would be prescribed if the callback had not been called. The seventh argument `metric' is a vector of double precision numbers (std::array in C++) containing the components of the symmetric metric tensor as it would be prescribed if the callback had not been called. The callback function can modify the `metric' in place or return a new vector of double precision numbers specifying the desired mesh size(s): a single number specifies an isotropic size and 6 numbers specify a symmetric anisotropic metric (the 6 components of the lower triangular part of the 3x3 matrix, in the order M11, M21, M22, M31, M32, M33). For convenience, in some languages (Python, Julia), a full 3x3 matrix can also be returned: the 6 unique components will then be extracted to define the symmetric metric.'''
+mesh.add('setMetricCallback', doc, None, isizemetricfun('metricCallback'))
+
+doc = '''Remove the mesh metric callback from the current model.'''
+mesh.add('removeMetricCallback', doc, None)
 
 doc = '''Set a transfinite meshing constraint on the curve `tag', with `numNodes' nodes distributed according to `meshType' and `coef'. Currently supported types are "Progression" (geometrical progression with power `coef'), "Bump" (refinement toward both extremities of the curve) and "Beta" (beta law).'''
 mesh.add('setTransfiniteCurve', doc, None, iint('tag'), iint('numNodes'), istring('meshType', '"Progression"'), idouble('coef', '1.'))
@@ -1094,6 +1100,9 @@ algorithm.add('triangulate', doc, None, ivectordouble('coordinates'), ovectorsiz
 doc = '''Tetrahedralize the points given in the `coordinates' vector as concatenated triplets of x, y, z coordinates, with (optional) constrained triangles given in the `triangles' vector as triplets of indexes (with numbering starting at 1), and return the tetrahedra as concatenated quadruplets of point indexes (with numbering starting at 1) in `tetrahedra'. Steiner points might be added in the `steiner' vector.'''
 algorithm.add('tetrahedralize', doc, None, ivectordouble('coordinates'), ovectorsize('tetrahedra'), ovectordouble('steiner'), ivectorsize('triangles', 'std::vector<std::size_t>()','[]', '[]'))
 
+doc = '''Refine the list of tetrahedra given in the vector `tetraIn', using point coordinates `coord' and nodal size field `sizeAtNode'. The new point coordinates are returned in the `steiner' vector, and the new tetrahedra in the `tetraOut' vector.'''
+algorithm.add('refineTetrahedra', doc, None, ivectordouble('coord'), ivectordouble('sizeAtNode'), ivectorsize('tetraIn'), ovectordouble('steiner'), ovectorsize('tetraOut'))
+
 ################################################################################
 
 plugin = gmsh.add_module('plugin', 'plugin functions')
@@ -1256,10 +1265,10 @@ logger.add('getWallTime', doc, odouble)
 doc = '''Return CPU time (in s).'''
 logger.add('getCpuTime', doc, odouble)
 
-doc = '''Return memory usage (in Mb).'''
+doc = '''Return memory usage (in MB).'''
 logger.add('getMemory', doc, odouble)
 
-doc = '''Return total available memory (in Mb).'''
+doc = '''Return total available memory (in MB).'''
 logger.add('getTotalMemory', doc, odouble)
 
 doc = '''Return last error message, if any.'''

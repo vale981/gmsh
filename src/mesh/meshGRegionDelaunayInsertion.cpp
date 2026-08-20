@@ -1325,6 +1325,16 @@ void insertVerticesInRegion(GRegion *gr, int maxIter,
             for(auto itv = vertices.begin(); itv != vertices.end(); ++itv) {
               if((*itv)->onWhat() != nullptr && (*itv)->onWhat()->dim() == 3 &&
                  (*itv)->onWhat() != myGRegion) {
+                // Remove from the previous owner's mesh_vertices before
+                // reassigning: addMeshVertex() below does not do this, so
+                // without it the vertex stays listed in both entities and
+                // gets deleted twice when their meshes are eventually
+                // destroyed.
+                GEntity *oldEntity = (*itv)->onWhat();
+                auto &oldVertices = oldEntity->mesh_vertices;
+                oldVertices.erase(
+                  std::remove(oldVertices.begin(), oldVertices.end(), *itv),
+                  oldVertices.end());
                 myGRegion->addMeshVertex((*itv));
                 (*itv)->setEntity(myGRegion);
               }
